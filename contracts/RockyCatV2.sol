@@ -51,7 +51,7 @@ contract RockyCatV2 is ERC20, Ownable, Pausable, ReentrancyGuard {
     uint256 public cooldownSeconds = 30;
 
     // Max Supply Limit
-    uint256 public constant MAX_SUPPLY = 1_000_000_000 * 10 ** 18; // 1B tokens
+    uint256 public constant MAX_SUPPLY = 1_000_000_000 * 10 ** 18; // 1M tokens
 
     mapping(address => uint256) public lastTradeTimestamp;
     mapping(address => bool) public blacklisted;
@@ -63,7 +63,7 @@ contract RockyCatV2 is ERC20, Ownable, Pausable, ReentrancyGuard {
         TRANSFER_CONTROLLED
     }
 
-    TransferMode public transferMode = TransferMode.TRANSFER_RESTRICTED;
+    TransferMode public transferMode = TransferMode.NORMAL;
     bool public transfersEnabled = false;
 
     // Tax Parameters
@@ -108,25 +108,35 @@ contract RockyCatV2 is ERC20, Ownable, Pausable, ReentrancyGuard {
     ) ERC20(name_, symbol_) Ownable() {
         require(initialOwner != address(0), "Initial owner cannot be zero address");
         require(initialSupply_ * 10 ** decimals() <= MAX_SUPPLY, "Initial supply exceeds max supply");
-        _transferOwnership(initialOwner);
+        _transferOwnership(initialOwner); // Set owner explicitly for OpenZeppelin v4.9.3
         _mint(initialOwner, initialSupply_ * 10 ** decimals());
 
+        // Default exclusions
         _isExcludedFromFees[initialOwner] = true;
         _isExcludedFromFees[address(this)] = true;
 
+        // Set default wallets
         marketingWallet = initialOwner;
         liquidityWallet = initialOwner;
     }
 
-    // ==========================
-    // 🧠 INTERNAL SECURITY CHECKS
-    // ==========================
-    function _beforeTokenTransfer(
+    // Override _transfer to include all checks and tax logic
+    function _transfer(
         address from,
         address to,
         uint256 amount
-    ) internal override whenNotPaused {
+    ) internal override {
+        _requireNotPaused();
+
         // Skip checks for minting or burning
+        if (from == address(0) || to == address(0)) {
+            // Check max supply for minting
+            if (from == address(0)) {
+                require(totalSupply() + amount <= MAX_SUPPLY, "Exceeds max supply");
+            }
+            super._transfer(from, to, amount);
+            return;
+        }
 
         // Combine blacklist checks
         require(!blacklisted[from] && !blacklisted[to], "Blacklisted address");
@@ -151,13 +161,17 @@ contract RockyCatV2 is ERC20, Ownable, Pausable, ReentrancyGuard {
             require(balanceOf(to) + amount <= maxWallet, "Exceeds max wallet");
         }
 
+        // Determine if fee should be taken
+        bool takeFee = !swapping && !_isExcludedFromFees[from] && !_isExcludedFromFees[to];
+
         // Custom transfer logic for taxes
         uint256 taxAmount = 0;
-        if (!_isExcludedFromFees[from] && !_isExcludedFromFees[to] && !swapping) {
+        bool isSell = _isAutomatedMarketMakerPair[to];
+        if (takeFee) {
             if (_isAutomatedMarketMakerPair[from]) {
                 // Buy
                 taxAmount = (amount * buyTax) / 10000;
-            } else if (_isAutomatedMarketMakerPair[to]) {
+            } else if (isSell) {
                 // Sell
                 taxAmount = (amount * sellTax) / 10000;
             } else {
@@ -169,18 +183,15 @@ contract RockyCatV2 is ERC20, Ownable, Pausable, ReentrancyGuard {
         if (taxAmount > 0) {
             super._transfer(from, address(this), taxAmount);
             amount -= taxAmount;
-
-            // Auto-swap if threshold reached (on sells)
-            if (_isAutomatedMarketMakerPair[to] && balanceOf(address(this)) >= taxSwapThreshold && taxSwapThreshold > 0) {
-                _swapTaxes();
-            }
         }
+
+        super._transfer(from, to, amount);
 
         lastTradeTimestamp[from] = block.timestamp;
 
-        // Update amount to reflect taxes before calling parent _transfer
-        if (amount > 0) {
-            super._transfer(from, to, amount);
+        // Auto-swap if threshold reached (on sells)
+        if (isSell && balanceOf(address(this)) >= taxSwapThreshold && taxSwapThreshold > 0) {
+            _swapTaxes();
         }
     }
 
@@ -225,7 +236,13 @@ contract RockyCatV2 is ERC20, Ownable, Pausable, ReentrancyGuard {
         emit AutomatedMarketMakerPairUpdated(uniswapV2Pair, true);
     }
 
-    function addLiquidity(uint256 tokenAmount, uint256 ethAmount) external onlyOwner nonReentrant {
+    function addLiquidity(uint256 tokenAmount, uint256 ethAmount) 
+        external 
+        onlyOwner 
+        nonReentrant 
+        payable 
+    {
+
         _approve(address(this), address(uniswapV2Router), tokenAmount);
 
         uniswapV2Router.addLiquidityETH{value: ethAmount}(

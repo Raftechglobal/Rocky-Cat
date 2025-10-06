@@ -138,14 +138,14 @@ contract RockyCatV2 is ERC20, Ownable, Pausable, ReentrancyGuard {
             require(owner() == from || owner() == to, "Controlled: only owner");
         }
 
-        Cooldown
+        // Cooldown
         require(block.timestamp >= lastTradeTimestamp[from] + cooldownSeconds, "Cooldown active");
 
         // Max Tx
         uint256 maxTx = (totalSupply() * MAX_TX_PERCENT) / 100;
         require(amount <= maxTx, "Exceeds max tx");
 
-        Max Wallet
+        // Max Wallet
         if (to != owner() && to != address(0)) {
             uint256 maxWallet = (totalSupply() * MAX_WALLET_PERCENT) / 100;
             require(balanceOf(to) + amount <= maxWallet, "Exceeds max wallet");
